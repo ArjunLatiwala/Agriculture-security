@@ -23,15 +23,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+
     - name: Run Trivy filesystem scanner
-      uses: aquasecurity/trivy-action@0.24.0
-      with:
-        scan-type: fs
-        scan-ref: .
-        format: table
-        output: trivy-fs-report.txt
-        severity: HIGH,CRITICAL
-        exit-code: 0
+      run: trivy fs --severity HIGH,CRITICAL --format table --output trivy-fs-report.txt --exit-code 0 .
 
     - name: Upload filesystem scan report
       uses: actions/upload-artifact@v4
@@ -142,14 +144,17 @@ jobs:
     name: Container Image Scanning
     needs: build-image
     steps:
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+
     - name: Run Trivy image scan
-      uses: aquasecurity/trivy-action@0.24.0
-      with:
-        image-ref: ${{ needs.build-image.outputs.image }}
-        format: table
-        output: trivy-image-report.txt
-        severity: HIGH,CRITICAL
-        exit-code: 0
+      run: trivy image --severity HIGH,CRITICAL --format table --output trivy-image-report.txt --exit-code 0 ${{ needs.build-image.outputs.image }}
 
     - name: Upload image scan report
       uses: actions/upload-artifact@v4
