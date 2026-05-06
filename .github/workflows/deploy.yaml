@@ -6,125 +6,78 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Job 1: Security Scanning
   security-scan:
     runs-on: ubuntu-latest
     name: Security Scanning
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
+    - name: Run Trivy filesystem scanner
+      uses: aquasecurity/trivy-action@0.24.0
       with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
+        scan-type: fs
+        scan-ref: .
+        format: table
+        output: trivy-fs-report.txt
+        severity: HIGH,CRITICAL
+        exit-code: 0
 
-    - name: Upload Trivy results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v2
+    - name: Upload filesystem scan report
+      uses: actions/upload-artifact@v4
       with:
-        sarif_file: 'trivy-results.sarif'
+        name: trivy-filesystem-report
+        path: trivy-fs-report.txt
 
-  # Job 2: Build and Test
-  build-and-test:
+  unit-tests:
     runs-on: ubuntu-latest
-    name: Build and Test
+    name: Unit Tests
     needs: security-scan
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: pip
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest
+        pip install pytest httpx
 
-    - name: Run unit tests
-      run: |
-        pytest test_app.py -v
+    - name: Run tests
+      run: pytest test_app.py -v
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-
-    - name: Log in to Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v4
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=ref,event=branch
-          type=sha,prefix={{branch}}-
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  # Job 3: Container Image Scanning
-  image-scan:
-    runs-on: ubuntu-latest
-    name: Container Image Scanning
-    needs: build-and-test
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Run Trivy image scan
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}
-        format: 'sarif'
-        output: 'trivy-image-results.sarif'
-
-    - name: Upload image scan results
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: 'trivy-image-results.sarif'
-
-  # Job 4: Code Quality Analysis
   code-quality:
     runs-on: ubuntu-latest
     name: Code Quality Analysis
     needs: security-scan
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: pip
 
-    - name: Install linting tools
-      run: |
-        pip install pylint flake8 bandit
+    - name: Install quality tools
+      run: pip install pylint flake8 bandit
 
     - name: Run Pylint
       run: pylint app.py --exit-zero
@@ -135,16 +88,84 @@ jobs:
     - name: Run Bandit security linter
       run: bandit -r app.py -f json -o bandit-report.json || true
 
-  # Job 5: Generate SBOM (Software Bill of Materials)
+    - name: Upload Bandit report
+      uses: actions/upload-artifact@v4
+      with:
+        name: bandit-report
+        path: bandit-report.json
+
+  build-image:
+    runs-on: ubuntu-latest
+    name: Build and Push Image
+    needs: [unit-tests, code-quality]
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract Docker metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=sha,prefix=sha-
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Set image output
+      id: image
+      run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  image-scan:
+    runs-on: ubuntu-latest
+    name: Container Image Scanning
+    needs: build-image
+    steps:
+    - name: Run Trivy image scan
+      uses: aquasecurity/trivy-action@0.24.0
+      with:
+        image-ref: ${{ needs.build-image.outputs.image }}
+        format: table
+        output: trivy-image-report.txt
+        severity: HIGH,CRITICAL
+        exit-code: 0
+
+    - name: Upload image scan report
+      uses: actions/upload-artifact@v4
+      with:
+        name: trivy-image-report
+        path: trivy-image-report.txt
+
   sbom:
     runs-on: ubuntu-latest
     name: Generate SBOM
-    needs: build-and-test
+    needs: build-image
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Generate SBOM with Syft
+    - name: Generate SBOM
       uses: anchore/sbom-action@v0
       with:
         path: .
@@ -152,79 +173,72 @@ jobs:
         output-file: sbom.json
 
     - name: Upload SBOM
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: sbom
         path: sbom.json
 
-  # Job 6: Deployment Validation
   deployment-validation:
     runs-on: ubuntu-latest
     name: Deployment Validation
-    needs: [build-and-test, image-scan, code-quality]
+    needs: [build-image, image-scan]
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Validate Kubernetes manifests
+    - name: Validate Kubernetes manifest syntax
       run: |
-        # Install kubeval
-        wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
-        tar xf kubeval-linux-amd64.tar.gz
-        ./kubeval deployment.yaml
+        docker run --rm -v "${PWD}:/work" ghcr.io/yannh/kubeconform:latest \
+          -strict -summary /work/deployment.yaml
 
-    - name: Validate Docker image exists
+    - name: Render deployment image
       run: |
-        echo "Docker image built and pushed successfully"
-        echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}"
+        sed "s|image: crop-yield-api:latest|image: ${{ needs.build-image.outputs.image }}|" deployment.yaml > rendered-deployment.yaml
+        grep "image:" rendered-deployment.yaml
 
-  # Job 7: Deployment (Dry Run)
-  deployment-dryrun:
+    - name: Upload rendered deployment
+      uses: actions/upload-artifact@v4
+      with:
+        name: rendered-deployment
+        path: rendered-deployment.yaml
+
+  deployment-dry-run:
     runs-on: ubuntu-latest
     name: Deployment Dry Run
     needs: deployment-validation
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Validate deployment manifest
-      run: |
-        echo "Deployment manifest validation passed"
-        echo "Ready for production deployment"
-        cat deployment.yaml | head -20
-
-    - name: Generate deployment report
-      run: |
-        echo "=== Deployment Report ===" > deployment-report.txt
-        echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}" >> deployment-report.txt
-        echo "Replicas: 3" >> deployment-report.txt
-        echo "Health Checks: Enabled" >> deployment-report.txt
-        echo "RBAC: Enabled" >> deployment-report.txt
-        echo "Network Policies: Enabled" >> deployment-report.txt
-        cat deployment-report.txt
-
-    - name: Upload deployment report
-      uses: actions/upload-artifact@v3
+    - name: Create local Kubernetes cluster
+      uses: helm/kind-action@v1
       with:
-        name: deployment-report
-        path: deployment-report.txt
+        cluster_name: ci-validation
 
-  # Job 8: Summary and Notifications
+    - name: Apply manifests to CI cluster
+      run: kubectl apply -f deployment.yaml
+
+    - name: Verify Kubernetes objects
+      run: |
+        kubectl get namespace production
+        kubectl get deployment crop-yield-api -n production
+        kubectl get service crop-yield-api -n production
+        kubectl get role crop-yield-api-role -n production
+        kubectl get networkpolicy crop-yield-api-netpol -n production
+
   summary:
     runs-on: ubuntu-latest
     name: Pipeline Summary
-    needs: [security-scan, build-and-test, image-scan, code-quality, sbom, deployment-validation, deployment-dryrun]
+    needs: [security-scan, unit-tests, code-quality, build-image, image-scan, sbom, deployment-validation, deployment-dry-run]
     if: always()
     steps:
-    - name: Pipeline Status
+    - name: Pipeline status
       run: |
-        echo "✅ Security Scanning: PASSED"
-        echo "✅ Build and Test: PASSED"
-        echo "✅ Container Image Scanning: PASSED"
-        echo "✅ Code Quality Analysis: PASSED"
-        echo "✅ SBOM Generation: PASSED"
-        echo "✅ Deployment Validation: PASSED"
-        echo "✅ Deployment Dry Run: PASSED"
-        echo ""
-        echo "🎉 Pipeline completed successfully!"
-        echo "Ready for production deployment"
+        echo "Security Scanning: ${{ needs.security-scan.result }}"
+        echo "Unit Tests: ${{ needs.unit-tests.result }}"
+        echo "Code Quality: ${{ needs.code-quality.result }}"
+        echo "Build Image: ${{ needs.build-image.result }}"
+        echo "Image Scanning: ${{ needs.image-scan.result }}"
+        echo "SBOM: ${{ needs.sbom.result }}"
+        echo "Deployment Validation: ${{ needs.deployment-validation.result }}"
+        echo "Deployment Dry Run: ${{ needs.deployment-dry-run.result }}"
