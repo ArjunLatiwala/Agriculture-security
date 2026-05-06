@@ -288,25 +288,14 @@ jobs:
             return minutes > 0 ? `${minutes}m ${remainder}s` : `${seconds}s`;
           };
 
-          const rows = order.map(name => {
-            const job = workflowJobs.find(item => item.name === name);
-            const status = statusByName[name];
-            return `| ${name} | ${icon(status)} ${status} | ${job ? duration(job) : '-'} |`;
-          }).join('\n');
-
-          const run = await github.rest.actions.getWorkflowRun({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            run_id: context.runId
-          });
-          const totalMs = new Date(run.data.updated_at) - new Date(run.data.created_at);
-          const totalSeconds = Math.round(totalMs / 1000);
+          const totalSeconds = Math.round((Date.now() - new Date(process.env.GITHUB_RUN_STARTED_AT || workflowJobs[0].started_at)) / 1000);
           const totalDuration = `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+          const overallStatus = Object.values(statusByName).every(status => status === 'success') ? 'success' : 'needs_attention';
 
           await core.summary
             .addHeading('DevSecOps Pipeline Summary')
-            .addRaw(`**Overall status:** ${icon(run.data.conclusion)} ${run.data.conclusion || 'in_progress'}  \\n`)
-            .addRaw(`**Total workflow duration:** ${totalDuration}  \\n`)
+            .addRaw(`**Overall status:** ${icon(overallStatus)} ${overallStatus}\n\n`)
+            .addRaw(`**Total workflow duration:** ${totalDuration}\n\n`)
             .addRaw(`**Container image:** \`${process.env.REGISTRY || 'ghcr.io'}/${process.env.IMAGE_NAME || context.repo.repo.toLowerCase()}:sha-${context.sha}\`\n\n`)
             .addTable([
               [{data: 'Job', header: true}, {data: 'Status', header: true}, {data: 'Duration', header: true}],
