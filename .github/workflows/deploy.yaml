@@ -288,21 +288,39 @@ jobs:
             return minutes > 0 ? `${minutes}m ${remainder}s` : `${seconds}s`;
           };
 
-          const totalSeconds = Math.round((Date.now() - new Date(process.env.GITHUB_RUN_STARTED_AT || workflowJobs[0].started_at)) / 1000);
-          const totalDuration = `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
           const overallStatus = Object.values(statusByName).every(status => status === 'success') ? 'success' : 'needs_attention';
+          const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            run_id: context.runId,
+            per_page: 100
+          });
+          const artifactLink = (name) => {
+            if (!name) return '-';
+            const artifact = artifacts.find(item => item.name === name);
+            return artifact ? `<a href="${artifact.archive_download_url}">${name}</a>` : name;
+          };
+          const artifactByName = {
+            'Security Scanning': artifactLink('trivy-filesystem-report'),
+            'Unit Tests': '-',
+            'Code Quality Analysis': artifactLink('bandit-report'),
+            'Build and Push Image': 'Docker build record + GHCR image',
+            'Container Image Scanning': artifactLink('trivy-image-report'),
+            'Generate SBOM': artifactLink('sbom'),
+            'Deployment Validation': artifactLink('rendered-deployment'),
+            'Deployment Dry Run': '-'
+          };
 
           await core.summary
             .addHeading('DevSecOps Pipeline Summary')
-            .addRaw(`**Overall status:** ${icon(overallStatus)} ${overallStatus}\n\n`)
-            .addRaw(`**Total workflow duration:** ${totalDuration}\n\n`)
-            .addRaw(`**Container image:** \`${process.env.REGISTRY || 'ghcr.io'}/${process.env.IMAGE_NAME || context.repo.repo.toLowerCase()}:sha-${context.sha}\`\n\n`)
+            .addRaw(`Overall status: ${icon(overallStatus)} ${overallStatus}\n\n`)
+            .addRaw(`Container image: \`${process.env.REGISTRY || 'ghcr.io'}/${process.env.IMAGE_NAME || context.repo.repo.toLowerCase()}:sha-${context.sha}\`\n\n`)
             .addTable([
-              [{data: 'Job', header: true}, {data: 'Status', header: true}, {data: 'Duration', header: true}],
+              [{data: 'Job', header: true}, {data: 'Status', header: true}, {data: 'Duration', header: true}, {data: 'Artifact', header: true}],
               ...order.map(name => {
                 const job = workflowJobs.find(item => item.name === name);
                 const status = statusByName[name];
-                return [name, `${icon(status)} ${status}`, job ? duration(job) : '-'];
+                return [name, `${icon(status)} ${status}`, job ? duration(job) : '-', artifactByName[name]];
               })
             ])
             .addHeading('Controls validated', 2)
