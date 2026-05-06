@@ -216,7 +216,11 @@ jobs:
   deployment-dry-run:
     runs-on: ubuntu-latest
     name: Deployment Dry Run
-    needs: deployment-validation
+    needs: [security-scan, unit-tests, code-quality, build-image, image-scan, sbom, deployment-validation]
+    if: always()
+    permissions:
+      actions: read
+      contents: read
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -237,15 +241,6 @@ jobs:
         kubectl get role crop-yield-api-role -n production
         kubectl get networkpolicy crop-yield-api-netpol -n production
 
-  summary:
-    runs-on: ubuntu-latest
-    name: Pipeline Summary
-    needs: [security-scan, unit-tests, code-quality, build-image, image-scan, sbom, deployment-validation, deployment-dry-run]
-    if: always()
-    permissions:
-      actions: read
-      contents: read
-    steps:
     - name: Create pipeline summary
       uses: actions/github-script@v7
       env:
@@ -256,7 +251,6 @@ jobs:
         IMAGE_SCAN_STATUS: ${{ needs.image-scan.result }}
         SBOM_STATUS: ${{ needs.sbom.result }}
         DEPLOYMENT_VALIDATION_STATUS: ${{ needs.deployment-validation.result }}
-        DEPLOYMENT_DRY_RUN_STATUS: ${{ needs.deployment-dry-run.result }}
       with:
         script: |
           const workflowJobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
@@ -274,13 +268,24 @@ jobs:
             'Container Image Scanning': process.env.IMAGE_SCAN_STATUS,
             'Generate SBOM': process.env.SBOM_STATUS,
             'Deployment Validation': process.env.DEPLOYMENT_VALIDATION_STATUS,
-            'Deployment Dry Run': process.env.DEPLOYMENT_DRY_RUN_STATUS
+            'Deployment Dry Run': 'success'
+          };
+
+          const artifactByName = {
+            'Security Scanning': 'trivy-filesystem-report',
+            'Unit Tests': '-',
+            'Code Quality Analysis': 'bandit-report',
+            'Build and Push Image': 'Docker build record + GHCR image',
+            'Container Image Scanning': 'trivy-image-report',
+            'Generate SBOM': 'sbom',
+            'Deployment Validation': 'rendered-deployment',
+            'Deployment Dry Run': '-'
           };
 
           const order = Object.keys(statusByName);
           const icon = (status) => status === 'success' ? '✅' : status === 'failure' ? '❌' : status === 'cancelled' ? '⚠️' : '⏳';
           const duration = (job) => {
-            if (!job.started_at || !job.completed_at) return '-';
+            if (!job?.started_at || !job?.completed_at) return '-';
             const ms = new Date(job.completed_at) - new Date(job.started_at);
             const seconds = Math.round(ms / 1000);
             const minutes = Math.floor(seconds / 60);
@@ -289,27 +294,6 @@ jobs:
           };
 
           const overallStatus = Object.values(statusByName).every(status => status === 'success') ? 'success' : 'needs_attention';
-          const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            run_id: context.runId,
-            per_page: 100
-          });
-          const artifactLink = (name) => {
-            if (!name) return '-';
-            const artifact = artifacts.find(item => item.name === name);
-            return artifact ? `<a href="${artifact.archive_download_url}">${name}</a>` : name;
-          };
-          const artifactByName = {
-            'Security Scanning': artifactLink('trivy-filesystem-report'),
-            'Unit Tests': '-',
-            'Code Quality Analysis': artifactLink('bandit-report'),
-            'Build and Push Image': 'Docker build record + GHCR image',
-            'Container Image Scanning': artifactLink('trivy-image-report'),
-            'Generate SBOM': artifactLink('sbom'),
-            'Deployment Validation': artifactLink('rendered-deployment'),
-            'Deployment Dry Run': '-'
-          };
 
           await core.summary
             .addHeading('DevSecOps Pipeline Summary')
